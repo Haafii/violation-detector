@@ -1,0 +1,629 @@
+import 'dart:async';
+import 'dart:collection';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
+
+import 'package:flutter/material.dart';
+import 'package:image/image.dart' as img;
+import 'package:ultralytics_yolo/ultralytics_yolo.dart';
+
+import '../detectors/helmet_detector.dart';
+import '../detectors/plate_detector.dart';
+import '../fsm/fsm_state.dart';
+import '../fsm/wrongside_pipeline.dart';
+import '../fsm/zone_topology.dart';
+import '../models/violation_record.dart';
+import '../ocr/plate_ocr_service.dart';
+import '../services/violation_storage_service.dart';
+import '../tracker/byte_tracker.dart';
+import '../widgets/violation_overlay_painter.dart';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plate chip buffer: sliding window of plate JPEG crops per track.
+// Each entry is a raw JPEG of a detected plate region.
+// ─────────────────────────────────────────────────────────────────────────────
+class _PlateBuffer {
+  _PlateBuffer({this.maxLen = 15});
+  final int maxLen;
+  final Queue<Uint8List> chips = Queue();
+
+  void push(Uint8List chip) {
+    chips.addLast(chip);
+    if (chips.length > maxLen) chips.removeFirst();
+  }
+
+  bool get isEmpty => chips.isEmpty;
+  List<Uint8List> get toList => chips.toList();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DetectionScreen
+// ─────────────────────────────────────────────────────────────────────────────
+class DetectionScreen extends StatefulWidget {
+  const DetectionScreen({super.key, this.topology, this.frameBytes});
+  final ZoneTopology? topology;
+  final Uint8List? frameBytes;
+
+  @override
+  State<DetectionScreen> createState() => _DetectionScreenState();
+}
+
+class _DetectionScreenState extends State<DetectionScreen>
+    with TickerProviderStateMixin {
+  // ── Pipeline ─────────────────────────────────────────────────────────────
+  late WrongSidePipeline _pipeline;
+  late ZoneTopology _topology;
+  bool _pipelineReady = false;
+
+  // ── Services ─────────────────────────────────────────────────────────────
+  final PlateOcrService _ocrService = PlateOcrService();
+  final ViolationStorageService _storage = ViolationStorageService();
+  final HelmetDetector _helmetDetector = HelmetDetector();
+  final PlateDetector _plateDetector = PlateDetector();
+
+  // ── YOLO controller ──────────────────────────────────────────────────────
+  late final YOLOViewController _yoloController;
+  bool _overlaysHidden = false;
+
+  // ── Frame counters ────────────────────────────────────────────────────────
+  int _frameNum = 0;
+  int _totalViolations = 0;
+  int _auxFrameCounter = 0;
+  static const int _auxEveryNFrames = 10;
+
+  // ── Camera dimensions (updated on first real frame) ────────────────────
+  int _frameWidth = 720;
+  int _frameHeight = 1280;
+
+  // ── Latest raw camera frame ───────────────────────────────────────────────
+  Uint8List? _latestFrame;
+
+  // ── Plate chip buffers per track ─────────────────────────────────────────
+  // Key: trackId  Value: sliding window of plate JPEG crops
+  final Map<int, _PlateBuffer> _plateBuffers = {};
+
+  // ── Overlay state ─────────────────────────────────────────────────────────
+  List<DetectionBox> _plateBboxes = [];
+  List<DetectionBox> _helmetBboxes = [];
+  final Set<int> _helmetConfirmedIds = {};
+
+  // ── Violation flash ───────────────────────────────────────────────────────
+  bool _flashVisible = false;
+  Timer? _flashTimer;
+  late AnimationController _flashAnim;
+  final Queue<ViolationRecord> _recentViolations = Queue();
+
+  // ── De-dup already-processed (trackId, violationType) ────────────────────
+  final Set<(int, String)> _processedTracks = {};
+
+  // ── Scale from model pixels → screen pixels ───────────────────────────────
+  double _scaleX = 1.0, _scaleY = 1.0;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  @override
+  void initState() {
+    super.initState();
+    _yoloController = YOLOViewController();
+    _flashAnim = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 300));
+    _initPipeline();
+  }
+
+  @override
+  void dispose() {
+    _flashTimer?.cancel();
+    _flashAnim.dispose();
+    _ocrService.dispose();
+    _helmetDetector.dispose();
+    _plateDetector.dispose();
+    super.dispose();
+  }
+
+  // ── Pipeline initialisation ───────────────────────────────────────────────
+  Future<void> _initPipeline() async {
+    final stored = await _storage.loadTopology();
+    final topology = widget.topology ??
+        (stored != null
+            ? ZoneTopology.fromJson(stored)
+            : ZoneTopology.fallback(720, 1280));
+    _topology = topology;
+    _pipeline = WrongSidePipeline(topology: topology, fps: 15);
+    _pipelineReady = true;
+    if (mounted) setState(() {});
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // YOLO streaming callback
+  // ─────────────────────────────────────────────────────────────────────────
+  void _onStreamingData(Map<String, dynamic> data) {
+    if (!_pipelineReady) return;
+
+    // Disable native overlays as soon as controller is ready
+    if (!_overlaysHidden && _yoloController.isInitialized) {
+      _yoloController.setShowOverlays(false);
+      _overlaysHidden = true;
+    }
+
+    if (data['originalImage'] != null) {
+      _latestFrame = data['originalImage'] as Uint8List;
+      // Quickly extract true dimensions from JPEG header to fix scaling
+      final info = img.findDecoderForData(_latestFrame!)?.decodeInfo(_latestFrame!);
+      if (info != null) {
+        _frameWidth = info.width;
+        _frameHeight = info.height;
+      }
+    }
+
+    if (data['detections'] != null) {
+      final dets = data['detections'] as List;
+      final results = dets.map((d) => YOLOResult.fromMap(d as Map)).toList();
+      _onResult(results);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Per-frame main update
+  // ─────────────────────────────────────────────────────────────────────────
+  void _onResult(List<YOLOResult> results) {
+    _frameNum++;
+    final ts = _frameNum / 15.0;
+
+    // 1. Feed raw detections into ByteTracker + FSM
+    final detections = results
+        .map((r) => Detection(
+              bbox: [
+                r.boundingBox.left,
+                r.boundingBox.top,
+                r.boundingBox.right,
+                r.boundingBox.bottom,
+              ],
+              score: r.confidence,
+              classId: r.classIndex,
+              className: r.className,
+            ))
+        .toList();
+
+    final events = _pipeline.updateDetections(detections, _frameNum, ts);
+
+    // 2. Handle any FSM violation events (wrong-side / footpath)
+    for (final event in events) {
+      final key = (event.trackId, event.violationType);
+      if (_processedTracks.contains(key)) continue;
+      _processedTracks.add(key);
+      _handleViolation(event);
+    }
+
+    // 3. Rebuild UI
+    if (mounted) setState(() {});
+
+    // 4. Every N frames run the heavy aux pipeline (plate + helmet detection)
+    _auxFrameCounter++;
+    if (_auxFrameCounter % _auxEveryNFrames == 0 && _latestFrame != null) {
+      _runAuxPipeline(_latestFrame!);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Auxiliary pipeline: helmet check + plate detection & buffering
+  //
+  // Pipeline per track:
+  //   Camera frame (JPEG)
+  //     → decode once
+  //     → vehicle crop  (+ upward padding for helmet)
+  //     → helmet model  → confirm no-helmet violation via sliding window
+  //     → plate model   → plate chip  → push into _plateBuffers[trackId]
+  // ─────────────────────────────────────────────────────────────────────────
+  Future<void> _runAuxPipeline(Uint8List frameJpeg) async {
+    final trackBboxes =
+        <int, ({String vehicleClass, List<double> bbox})>{};
+    for (final e in _pipeline.trackStates.entries) {
+      trackBboxes[e.key] =
+          (vehicleClass: e.value.vehicleClass, bbox: e.value.bbox);
+    }
+
+    // Remove stale plate buffers for tracks that are no longer active
+    final activeIds = trackBboxes.keys.toSet();
+    final stale = _plateBuffers.keys.where((id) => !activeIds.contains(id)).toList();
+    for (final id in stale) {
+      _plateBuffers.remove(id);
+      _helmetDetector.releaseTrack(id);
+      _helmetConfirmedIds.remove(id);
+    }
+
+    // ── Decode frame once for all crops ─────────────────────────────────
+    img.Image? decoded;
+    final allPlateBoxes = <DetectionBox>[];
+
+    for (final entry in trackBboxes.entries) {
+      final tid = entry.key;
+      final vehicleClass = entry.value.vehicleClass;
+      final bbox = entry.value.bbox;
+
+      decoded ??= img.decodeImage(frameJpeg);
+      if (decoded == null) break;
+
+      // ── (A) Helmet check: only for two-wheelers ───────────────────────
+      if (vehicleClass == 'motorcycle' || vehicleClass == 'two-wheeler') {
+        // HelmetDetector handles upward padding internally
+        final (noHelmetConfirmed, hBoxes) = await _helmetDetector.hasNoHelmet(
+          frameBytes: frameJpeg,
+          bbox: bbox,
+          frameWidth: _frameWidth,
+          frameHeight: _frameHeight,
+        );
+        if (hBoxes.isNotEmpty && mounted) {
+          if (mounted) {
+            setState(() {
+              _helmetBboxes = hBoxes;
+            });
+          }
+        }
+        // Update sliding window; if newly confirmed → trigger violation
+        final alreadyConfirmed = _helmetDetector.isConfirmed(tid);
+        if (!alreadyConfirmed &&
+            _helmetDetector.updateWindow(tid, noHelmetConfirmed)) {
+          _helmetConfirmedIds.add(tid);
+          final state = _pipeline.trackStates[tid];
+          if (state != null) {
+            final event = ViolationEvent(
+              trackId: tid,
+              vehicleClass: vehicleClass,
+              violationType: 'no_helmet',
+              zoneId: state.currentZones.isNotEmpty
+                  ? state.currentZones.first
+                  : '',
+              frameNumber: _frameNum,
+              timestampS: _frameNum / 15.0,
+              confidence: 0.9,
+              headingDeg: state.headingRad != null
+                  ? state.headingRad! * 180 / 3.14159
+                  : null,
+              bboxPx: state.bbox,
+              isCongested: false,
+              weather: 'day',
+            );
+            final key = (event.trackId, event.violationType);
+            if (!_processedTracks.contains(key)) {
+              _processedTracks.add(key);
+              _handleViolation(event);
+            }
+          }
+        }
+      }
+
+      // ── (B) Plate detection: crop vehicle → run YOLO → buffer chip ────
+      // We buffer plate chips for ALL vehicles (needed for plate extraction
+      // on any violation type — wrong-side, footpath, no-helmet).
+      final plateResult = await _plateDetector.detectPlate(
+        frameDecoded: decoded,
+        vehicleBbox: bbox,
+        frameWidth: _frameWidth,
+        frameHeight: _frameHeight,
+      );
+      allPlateBoxes.addAll(plateResult.overlayBoxes);
+
+      // Buffer plate chips in the per-track sliding window
+      if (plateResult.plateChips.isNotEmpty) {
+        final buf = _plateBuffers.putIfAbsent(tid, () => _PlateBuffer());
+        for (final chip in plateResult.plateChips) {
+          buf.push(chip);
+        }
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _plateBboxes = allPlateBoxes;
+      });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Handle a confirmed violation:
+  //   1. Save preliminary record immediately (so UI shows fast)
+  //   2. Run OCR on buffered plate chips
+  //   3. Update record with plate number
+  // ─────────────────────────────────────────────────────────────────────────
+  Future<void> _handleViolation(ViolationEvent event) async {
+    debugPrint(
+        '[Violation] ${event.violationType} track=${event.trackId}');
+    _showFlash();
+
+    final record =
+        ViolationRecord.fromEvent(event, plateNumber: null, plateConfidence: null);
+
+    if (mounted) {
+      setState(() {
+        _totalViolations++;
+        _recentViolations.addLast(record);
+        if (_recentViolations.length > 3) _recentViolations.removeFirst();
+      });
+    }
+
+    // Save snapshot immediately (without plate text)
+    await _storage.save(record);
+    if (_latestFrame != null) {
+      await _storage.saveViolationSnapshot(record, _latestFrame!);
+    }
+
+    // ── OCR from buffered plate chips ────────────────────────────────────
+    // These are cropped plate images (not vehicle crops), so ML Kit sees
+    // a tight plate region → much better accuracy.
+    final buf = _plateBuffers[event.trackId];
+    if (buf != null && !buf.isEmpty) {
+      final chips = buf.toList;
+      final uiImages = <ui.Image>[];
+      for (final chipJpeg in chips) {
+        try {
+          final codec = await ui.instantiateImageCodec(chipJpeg);
+          final frame = await codec.getNextFrame();
+          uiImages.add(frame.image);
+        } catch (_) {}
+      }
+
+      if (uiImages.isNotEmpty) {
+        final (plate, conf) = await _ocrService.recognizeBest(uiImages);
+        if (plate != null && mounted) {
+          final updated =
+              record.copyWith(plateNumber: plate, plateConfidence: conf);
+          await _storage.save(updated);
+          if (_latestFrame != null) {
+            await _storage.saveViolationSnapshot(updated, _latestFrame!, plateChips: chips);
+          }
+          if (mounted) {
+            setState(() {
+              final list = _recentViolations.toList();
+              final idx =
+                  list.indexWhere((r) => r.eventId == record.eventId);
+              if (idx >= 0) {
+                list[idx] = updated;
+                _recentViolations.clear();
+                for (final r in list) _recentViolations.add(r);
+              }
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  void _showFlash() {
+    _flashTimer?.cancel();
+    if (mounted) {
+      setState(() => _flashVisible = true);
+      _flashAnim.forward(from: 0);
+    }
+    _flashTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted) setState(() => _flashVisible = false);
+    });
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Build
+  // ─────────────────────────────────────────────────────────────────────────
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(children: [
+        // ── Camera + YOLO inference ────────────────────────────────────
+        if (_pipelineReady)
+          SizedBox.expand(
+            child: YOLOView(
+              controller: _yoloController,
+              modelPath: 'assets/models/vehicle_yolov11n.tflite',
+              task: YOLOTask.detect,
+              streamingConfig: const YOLOStreamingConfig(
+                maxFPS: 15,
+                includeOriginalImage: true,
+              ),
+              onModelLoad: (path, task) {
+                _yoloController.setShowOverlays(false);
+              },
+              onStreamingData: _onStreamingData,
+            ),
+          ),
+
+        // ── Custom overlay painter ────────────────────────────────────
+        if (_pipelineReady)
+          LayoutBuilder(builder: (ctx, constraints) {
+            final sz = constraints.biggest;
+            _scaleX = sz.width / _frameWidth;
+            _scaleY = sz.height / _frameHeight;
+            return CustomPaint(
+              size: sz,
+              painter: ViolationOverlayPainter(
+                trackStates: Map.from(_pipeline.trackStates),
+                topology: _topology,
+                helmetConfirmedIds: _helmetConfirmedIds,
+                recentViolations:
+                    _recentViolations.map((r) => r.violationLabel).toList(),
+                scaleX: _scaleX,
+                scaleY: _scaleY,
+                showFlashBorder: _flashVisible,
+                plateBboxes: _plateBboxes,
+                helmetBboxes: _helmetBboxes,
+              ),
+            );
+          }),
+
+        // ── Loading indicator ─────────────────────────────────────────
+        if (!_pipelineReady)
+          const Center(
+              child: CircularProgressIndicator(color: Color(0xFF00D4FF))),
+
+        // ── HUD ───────────────────────────────────────────────────────
+        SafeArea(child: _buildHud()),
+
+        // ── Violation banner ─────────────────────────────────────────
+        if (_flashVisible && _recentViolations.isNotEmpty)
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: _buildViolationBanner(_recentViolations.last),
+          ),
+      ]),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // HUD
+  // ─────────────────────────────────────────────────────────────────────────
+  Widget _buildHud() {
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Row(children: [
+        _HudButton(
+            icon: Icons.arrow_back_ios_new_rounded,
+            onTap: () => Navigator.pop(context)),
+        const SizedBox(width: 10),
+        Container(
+          padding:
+              const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.6),
+            borderRadius: BorderRadius.circular(30),
+            border: Border.all(color: Colors.white12),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.track_changes_rounded,
+                color: Color(0xFF00D4FF), size: 14),
+            const SizedBox(width: 6),
+            Text(
+              'Frame $_frameNum  │  '
+              '${_pipelineReady ? _pipeline.trackStates.length : 0} tracks',
+              style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500),
+            ),
+          ]),
+        ),
+        const Spacer(),
+        if (_totalViolations > 0)
+          Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFF3B30).withOpacity(0.9),
+              borderRadius: BorderRadius.circular(30),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.warning_rounded,
+                  color: Colors.white, size: 14),
+              const SizedBox(width: 5),
+              Text('$_totalViolations violations',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700)),
+            ]),
+          ),
+      ]),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Violation banner
+  // ─────────────────────────────────────────────────────────────────────────
+  Widget _buildViolationBanner(ViolationRecord record) {
+    final color = record.violationType == 'wrong_side'
+        ? const Color(0xFFFF3B30)
+        : record.violationType == 'footpath_driving'
+            ? const Color(0xFFFF9500)
+            : const Color(0xFF34C759);
+
+    return Container(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [color.withOpacity(0.0), color.withOpacity(0.95)],
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(20, 24, 20, 36),
+      child: SafeArea(
+        top: false,
+        child: Row(children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(12)),
+            child: const Icon(Icons.warning_rounded,
+                color: Colors.white, size: 26),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '⚠  ${record.violationLabel.toUpperCase()}',
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.5),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  'Track #${record.trackId}  ·  ${record.vehicleClass}'
+                  '${record.plateNumber != null ? '  ·  🔢 ${record.plateNumber}' : ''}',
+                  style: TextStyle(
+                      color: Colors.white.withOpacity(0.85),
+                      fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DetectionBox: used by both DetectionScreen and ViolationOverlayPainter
+// ─────────────────────────────────────────────────────────────────────────────
+class DetectionBox {
+  const DetectionBox({
+    required this.rect,
+    required this.label,
+    required this.confidence,
+    required this.color,
+  });
+
+  final Rect rect;
+  final String label;
+  final double confidence;
+  final Color color;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+class _HudButton extends StatelessWidget {
+  const _HudButton({required this.icon, required this.onTap});
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.5),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: Colors.white12),
+        ),
+        child: Icon(icon, color: Colors.white, size: 18),
+      ),
+    );
+  }
+}

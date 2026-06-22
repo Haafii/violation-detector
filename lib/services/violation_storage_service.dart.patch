@@ -1,0 +1,37 @@
+--- lib/services/violation_storage_service.dart
++++ lib/services/violation_storage_service.dart
+@@ -88,14 +88,27 @@
+   ///
+   /// Returns the path to the saved JPEG, or null on error.
+   Future<String?> saveViolationSnapshot(
+-      ViolationRecord record, Uint8List frameJpeg) async {
++      ViolationRecord record, Uint8List frameJpeg, {List<Uint8List>? plateChips}) async {
+     try {
+       final dir = await _violationsDir;
+       final safeId = record.eventId.replaceAll(RegExp(r'[^a-zA-Z0-9_\-]'), '_');
+ 
+       // JPEG
+       final jpegFile = File('${dir.path}/violation_$safeId.jpg');
+       await jpegFile.writeAsBytes(frameJpeg);
+ 
++      // Save plate chips if provided
++      final chipPaths = <String>[];
++      if (plateChips != null && plateChips.isNotEmpty) {
++        for (var i = 0; i < plateChips.length; i++) {
++           final chipFile = File('${dir.path}/violation_${safeId}_plate_$i.jpg');
++           await chipFile.writeAsBytes(plateChips[i]);
++           chipPaths.add(chipFile.path);
++        }
++      }
++
+       // JSON sidecar — mirrors Python event_logger CSV_FIELDS
+       final meta = {
+         'event_id':          record.eventId,
+@@ -113,6 +126,7 @@
+         'plate_number':      record.plateNumber ?? '',
+         'bbox':              record.bbox ?? [],
+         'image_path':        jpegFile.path,
++        if (chipPaths.isNotEmpty) 'plate_crops': chipPaths,
+       };
+       final jsonFile = File('${dir.path}/violation_$safeId.json');
+       await jsonFile.writeAsString(const JsonEncoder.withIndent('  ').convert(meta));

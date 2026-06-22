@@ -1,0 +1,11 @@
+--- lib/screens/detection_screen.dart
++++ lib/screens/detection_screen.dart
+@@ -127,7 +127,7 @@
+     if (data['originalImage'] != null) {
+       _latestFrame = data['originalImage'] as Uint8List;
+       // Quickly extract true dimensions from JPEG header to fix scaling
+-      final info = img.findDecoderForData(_latestFrame!)?.decodeInfo(_latestFrame!);
++      final info = img.findDecoderForData(_latestFrame!)?.startDecode(_latestFrame!);
+       if (info != null) {
+         _frameWidth = info.width;
+         _frameHeight = info.height;

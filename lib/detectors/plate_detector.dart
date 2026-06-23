@@ -116,7 +116,7 @@ class PlateDetector {
           final upscaled = (chipW < 200 || chipH < 60)
               ? img.copyResize(chip, width: 400, interpolation: img.Interpolation.cubic)
               : chip;
-          plateChips.add(Uint8List.fromList(img.encodeJpg(upscaled, quality: 95)));
+          plateChips.add(Uint8List.fromList(img.encodeJpg(upscaled, quality: 100)));
         }
       }
 

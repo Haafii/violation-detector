@@ -198,6 +198,7 @@ class _DetectionScreenState extends State<DetectionScreen>
 
   // ── Latest raw camera JPEG ────────────────────────────────────────────────
   Uint8List? _latestFrame;
+  List<YOLOResult>? _latestDetections;
 
   // ── Per-track vehicle crop buffers (3-4 crops each) ───────────────────────
   // Populated every cropEvery-th frame; flushed when track goes stale.
@@ -408,7 +409,7 @@ class _DetectionScreenState extends State<DetectionScreen>
     if (mounted) setState(() {});
   }
 
-  Future<void> _captureAndAnalyse(Uint8List rawBytes) async {
+  Future<void> _captureAndAnalyse(Uint8List rawBytes, List<YOLOResult>? landscapeDetections) async {
     try {
       // 1. Rotate to portrait in background isolate first before freezing/drawing landscape
       final rotatedBytes = await compute(_rotateJpegToPortrait, rawBytes);
@@ -426,9 +427,26 @@ class _DetectionScreenState extends State<DetectionScreen>
         debugPrint('[Calibration] Dims updated from rotated frame: ${_frameWidth}x$_frameHeight');
       }
 
-      // 3. Run road segmentation on portrait frame using RoadDetector
-      final results = await _roadDetector.detectRoad(rotatedBytes);
-      debugPrint('[Calibration] RoadDetector found ${results.length} segments.');
+      final List<YOLOResult> results;
+      if (landscapeDetections != null && landscapeDetections.isNotEmpty) {
+        debugPrint('[Calibration] Rotating ${landscapeDetections.length} live stream masks.');
+        results = landscapeDetections.map((r) {
+          final rotatedMask = r.mask != null ? _rotateMask90Clockwise(r.mask!) : null;
+          return YOLOResult(
+            classIndex: r.classIndex,
+            className: r.className,
+            confidence: r.confidence,
+            boundingBox: r.boundingBox,
+            normalizedBox: r.normalizedBox,
+            mask: rotatedMask,
+          );
+        }).toList();
+      } else {
+        // Fallback: run road segmentation on portrait frame using RoadDetector
+        debugPrint('[Calibration] No live detections available, falling back to RoadDetector prediction.');
+        results = await _roadDetector.detectRoad(rotatedBytes);
+      }
+      debugPrint('[Calibration] Resolved ${results.length} segments for auto-calibration.');
 
       // 4. Finalize calibration from this single frame
       final topology = _calibrationService.finalizeFromSingleFrame(
@@ -452,6 +470,19 @@ class _DetectionScreenState extends State<DetectionScreen>
     }
   }
 
+  List<List<double>> _rotateMask90Clockwise(List<List<double>> src) {
+    if (src.isEmpty || src[0].isEmpty) return src;
+    final h = src.length;
+    final w = src[0].length;
+    final dst = List.generate(w, (_) => List.filled(h, 0.0));
+    for (int y = 0; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        dst[x][h - 1 - y] = src[y][x];
+      }
+    }
+    return dst;
+  }
+
   void _onRescan() {
     setState(() {
       _detectedTopology = null;
@@ -463,6 +494,7 @@ class _DetectionScreenState extends State<DetectionScreen>
       _includeMasks = true;
       _hideOverlaysCounter = 0;
       _overlaysHidden = false;
+      _latestDetections = null;
     });
   }
 
@@ -474,11 +506,15 @@ class _DetectionScreenState extends State<DetectionScreen>
       return;
     }
     if (_isAnalysing) return;
+
+    final snapFrame = _latestFrame!;
+    final snapDets = _latestDetections;
+
     setState(() {
       _isAnalysing = true;
       _calibState = _CalibState.analysing;
     });
-    _captureAndAnalyse(_latestFrame!);
+    _captureAndAnalyse(snapFrame, snapDets);
   }
 
   Future<void> _onManualDraw() async {
@@ -681,6 +717,11 @@ class _DetectionScreenState extends State<DetectionScreen>
     if (data['originalImage'] != null) {
       final bytes = data['originalImage'] as Uint8List;
       _latestFrame = bytes;
+
+      if (data['detections'] != null && _calibState == _CalibState.capturing) {
+        final dets = data['detections'] as List;
+        _latestDetections = dets.map((d) => YOLOResult.fromMap(d as Map)).toList();
+      }
 
       // Read actual JPEG resolution once.
       // Swap width/height if landscape to get portrait dimensions.

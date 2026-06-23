@@ -111,7 +111,7 @@ List<_CropResult> _cropAllVehicles(_CropArgs args) {
         x: cx1, y: cy1, width: cx2 - cx1, height: cy2 - cy1);
     results.add(_CropResult(
       trackId: track.trackId,
-      cropJpeg: Uint8List.fromList(img.encodeJpg(crop, quality: 100)),
+      cropJpeg: Uint8List.fromList(img.encodeJpg(crop, quality: 95)),
     ));
   }
   return results;

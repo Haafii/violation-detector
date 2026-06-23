@@ -1102,9 +1102,13 @@ class _DetectionScreenState extends State<DetectionScreen>
             ),
           ),
 
-        if ((!_pipelineReady || _isModelLoading) && _calibState == _CalibState.detecting)
+        if (!_pipelineReady || (_isModelLoading && (_calibState == _CalibState.idle || _calibState == _CalibState.detecting)))
           Positioned.fill(
-            child: _buildModelLoadingOverlay('Initializing Camera & AI Tracker…'),
+            child: _buildModelLoadingOverlay(
+              _calibState == _CalibState.detecting
+                  ? 'Initializing Camera & AI Tracker…'
+                  : 'Initializing Camera & AI Models…',
+            ),
           ),
 
         if (showHud) SafeArea(child: _buildHud()),
@@ -1527,7 +1531,7 @@ class _DetectionScreenState extends State<DetectionScreen>
 
   Widget _buildModelLoadingOverlay(String message) {
     return Container(
-      color: Colors.black.withValues(alpha: 0.75),
+      color: const Color(0xFF0A0A0E),
       child: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,

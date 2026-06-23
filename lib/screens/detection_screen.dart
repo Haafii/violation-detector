@@ -653,11 +653,26 @@ class _DetectionScreenState extends State<DetectionScreen>
     if (zonesNeedingHeading.isEmpty) {
       // All headings resolved automatically — transition to direction confirmation overlay!
       debugPrint('[Calibration] All headings auto-detected. Transitioning to direction confirmation.');
-      setState(() {
-        _frozenFrame = _latestFrame;
-        _detectedTopology = finalTopology;
-        _calibState = _CalibState.confirmingDirections;
-      });
+      final rawFrame = _latestFrame;
+      if (rawFrame != null) {
+        final rotatedBytes = await compute(_rotateJpegToPortrait, rawFrame);
+        final info = img.findDecoderForData(rotatedBytes)?.startDecode(rotatedBytes);
+        if (info != null && info.width > 0 && info.height > 0) {
+          _frameWidth = info.width;
+          _frameHeight = info.height;
+          debugPrint('[Calibration] Dims updated from rotated frame: ${_frameWidth}x$_frameHeight');
+        }
+        setState(() {
+          _frozenFrame = rotatedBytes;
+          _detectedTopology = finalTopology;
+          _calibState = _CalibState.confirmingDirections;
+        });
+      } else {
+        setState(() {
+          _detectedTopology = finalTopology;
+          _calibState = _CalibState.confirmingDirections;
+        });
+      }
     } else {
       // Fallback: open ManualHeadingScreen for zones that still need it
       debugPrint(

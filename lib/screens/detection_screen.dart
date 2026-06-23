@@ -168,6 +168,8 @@ class _DetectionScreenState extends State<DetectionScreen>
   bool _includeMasks = false;
   bool _isAnalysing = false;
   bool _isModelLoading = true;
+  bool _firstFrameReceived = false;
+  String? _loadedModelPath;
 
   Uint8List? _frozenFrame;
   ZoneTopology? _detectedTopology;
@@ -347,6 +349,8 @@ class _DetectionScreenState extends State<DetectionScreen>
     _vehicleTrackThresh = prefs.getDouble('vehicle_track_threshold') ?? 0.4;
     _vehicleHighThresh = prefs.getDouble('vehicle_high_threshold') ?? 0.5;
 
+    _firstFrameReceived = false;
+
     // Load and assign detector confidence thresholds once at screen startup
     final helmetConf = prefs.getDouble('helmet_conf_threshold') ?? 0.35;
     final roadConf = prefs.getDouble('road_conf_threshold') ?? 0.25;
@@ -364,6 +368,7 @@ class _DetectionScreenState extends State<DetectionScreen>
       _currentTask = YOLOTask.detect;
       _includeMasks = false;
       _isModelLoading = true;
+      _loadedModelPath = null;
       _normalizedTopology = _normalizeIfNeeded(widget.topology!);
       _recreatePipelineWithResolution(_frameWidth.toDouble(), _frameHeight.toDouble());
       _pipelineReady = true;
@@ -380,6 +385,7 @@ class _DetectionScreenState extends State<DetectionScreen>
         _currentTask = YOLOTask.detect;
         _includeMasks = false;
         _isModelLoading = true;
+        _loadedModelPath = null;
         final rawTopology = ZoneTopology.fromJson(stored);
         _normalizedTopology = _normalizeIfNeeded(rawTopology);
         _recreatePipelineWithResolution(_frameWidth.toDouble(), _frameHeight.toDouble());
@@ -396,6 +402,7 @@ class _DetectionScreenState extends State<DetectionScreen>
     _includeMasks = true;
     _isAnalysing = false;
     _isModelLoading = true;
+    _loadedModelPath = null;
     _calibrationService.reset();
     
     _topology = ZoneTopology(zones: []);
@@ -500,6 +507,8 @@ class _DetectionScreenState extends State<DetectionScreen>
       _overlaysHidden = false;
       _latestDetections = null;
       _isModelLoading = true;
+      _loadedModelPath = null;
+      _firstFrameReceived = false;
     });
   }
 
@@ -594,6 +603,8 @@ class _DetectionScreenState extends State<DetectionScreen>
       _observingSecondsLeft = duration;
       _calibState = _CalibState.observing;
       _isModelLoading = true;
+      _loadedModelPath = null;
+      _firstFrameReceived = false;
       // Switch YOLOView to vehicle detection model
       _currentModelPath = 'assets/models/vehicle_yolov11n.tflite';
       _currentTask = YOLOTask.detect;
@@ -733,6 +744,18 @@ class _DetectionScreenState extends State<DetectionScreen>
       if (data['detections'] != null && _calibState == _CalibState.capturing) {
         final dets = data['detections'] as List;
         _latestDetections = dets.map((d) => YOLOResult.fromMap(d as Map)).toList();
+      }
+
+      if (!_firstFrameReceived && _loadedModelPath == _currentModelPath) {
+        _firstFrameReceived = true;
+        _isModelLoading = false;
+        debugPrint('[Frame] First camera stream frame received for current model $_loadedModelPath, clearing loading HUD.');
+        if (_calibState == _CalibState.observing) {
+          _startObservingTimer();
+        }
+        if (mounted) {
+          setState(() {});
+        }
       }
 
       // Read actual JPEG resolution once.
@@ -1050,19 +1073,14 @@ class _DetectionScreenState extends State<DetectionScreen>
                       includeMasks: _includeMasks,
                     ),
                     onModelLoad: (path, task) {
+                      debugPrint('[Model] Model loaded successfully: $path');
+                      setState(() {
+                        _loadedModelPath = path;
+                      });
                       final isSegment = task == YOLOTask.segment;
                       _yoloController.setShowOverlays(isSegment);
                       if (!isSegment) {
                         _hideOverlaysCounter = 30; // Force-hide overlays over the next 30 frames
-                      }
-                      if (mounted) {
-                        setState(() {
-                          _isModelLoading = false;
-                        });
-                        // If we are in Phase 2 (observing) and the vehicle model has loaded, start the timer!
-                        if (_calibState == _CalibState.observing) {
-                          _startObservingTimer();
-                        }
                       }
                     },
                     onStreamingData: _onStreamingData,

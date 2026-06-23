@@ -166,6 +166,7 @@ class _DetectionScreenState extends State<DetectionScreen>
   String _currentModelPath = 'assets/models/vehicle_yolov11n.tflite';
   YOLOTask _currentTask = YOLOTask.detect;
   bool _includeMasks = false;
+  bool _isAnalysing = false;
 
   Uint8List? _frozenFrame;
   ZoneTopology? _detectedTopology;
@@ -389,6 +390,7 @@ class _DetectionScreenState extends State<DetectionScreen>
     _currentModelPath = 'assets/models/vehicle_yolov11n.tflite';
     _currentTask = YOLOTask.detect;
     _includeMasks = false;
+    _isAnalysing = false;
     _calibrationService.reset();
     
     _topology = ZoneTopology(zones: []);
@@ -407,15 +409,14 @@ class _DetectionScreenState extends State<DetectionScreen>
   }
 
   Future<void> _captureAndAnalyse(Uint8List rawBytes) async {
-    setState(() {
-      _calibState = _CalibState.analysing;
-      _frozenFrame = rawBytes; // temporary before rotation
-    });
-
     try {
-      // 1. Rotate to portrait in background isolate
+      // 1. Rotate to portrait in background isolate first before freezing/drawing landscape
       final rotatedBytes = await compute(_rotateJpegToPortrait, rawBytes);
-      _frozenFrame = rotatedBytes;
+
+      setState(() {
+        _calibState = _CalibState.analysing;
+        _frozenFrame = rotatedBytes;
+      });
 
       // 2. Decode info to update portrait dimensions
       final info = img.findDecoderForData(rotatedBytes)?.startDecode(rotatedBytes);
@@ -446,6 +447,8 @@ class _DetectionScreenState extends State<DetectionScreen>
         _calibState = _CalibState.confirmingZones;
         _detectedTopology = ZoneTopology(zones: []);
       });
+    } finally {
+      _isAnalysing = false;
     }
   }
 
@@ -453,6 +456,7 @@ class _DetectionScreenState extends State<DetectionScreen>
     setState(() {
       _detectedTopology = null;
       _frozenFrame = null;
+      _isAnalysing = false;
       _calibState = _CalibState.capturing;
     });
   }
@@ -634,7 +638,8 @@ class _DetectionScreenState extends State<DetectionScreen>
       final bytes = data['originalImage'] as Uint8List;
       _latestFrame = bytes;
 
-      if (_calibState == _CalibState.capturing) {
+      if (_calibState == _CalibState.capturing && !_isAnalysing) {
+        _isAnalysing = true;
         _captureAndAnalyse(bytes);
       }
 

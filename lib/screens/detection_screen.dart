@@ -570,7 +570,11 @@ class _DetectionScreenState extends State<DetectionScreen>
     );
 
     if (result != null && mounted) {
-      _finishCalibration(result);
+      // Transition to Phase 2 (Observing) to automatically detect traffic directions on the manually drawn zones!
+      setState(() {
+        _phase1Topology = result;
+      });
+      _startObservingPhase();
     }
   }
 

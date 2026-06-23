@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart'; // for compute()
 import 'package:flutter/material.dart';
@@ -133,6 +134,7 @@ enum _CalibState {
   analysing,       // running road seg on frozen frame (loading overlay)
   confirmingZones, // showing frozen frame + polygon; awaiting Accept/Reject
   observing,       // vehicle model loaded; watching traffic to auto-detect heading
+  confirmingDirections, // showing frozen frame + zones + auto-detected heading arrows; awaiting Accept/Retry
   headingSetup,    // navigated to ManualHeadingScreen (awaiting return)
   detecting,       // normal violation detection
 }
@@ -649,9 +651,13 @@ class _DetectionScreenState extends State<DetectionScreen>
         finalTopology.zones.where((z) => z.needsManualHeading).toList();
 
     if (zonesNeedingHeading.isEmpty) {
-      // All headings resolved automatically — done!
-      debugPrint('[Calibration] All headings auto-detected. Finishing calibration.');
-      _finishCalibration(finalTopology);
+      // All headings resolved automatically — transition to direction confirmation overlay!
+      debugPrint('[Calibration] All headings auto-detected. Transitioning to direction confirmation.');
+      setState(() {
+        _frozenFrame = _latestFrame;
+        _detectedTopology = finalTopology;
+        _calibState = _CalibState.confirmingDirections;
+      });
     } else {
       // Fallback: open ManualHeadingScreen for zones that still need it
       debugPrint(
@@ -1048,6 +1054,7 @@ class _DetectionScreenState extends State<DetectionScreen>
     final bool showCalibrationOverlay = _calibState == _CalibState.analysing;
     final bool showConfirmationOverlay = _calibState == _CalibState.confirmingZones;
     final bool showObservingOverlay = _calibState == _CalibState.observing;
+    final bool showConfirmingDirectionsOverlay = _calibState == _CalibState.confirmingDirections;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -1155,6 +1162,11 @@ class _DetectionScreenState extends State<DetectionScreen>
         if (showObservingOverlay)
           Positioned.fill(
             child: _buildObservingOverlay(),
+          ),
+
+        if (showConfirmingDirectionsOverlay)
+          Positioned.fill(
+            child: _buildConfirmingDirectionsUI(),
           ),
       ]),
     );
@@ -1480,6 +1492,142 @@ class _DetectionScreenState extends State<DetectionScreen>
                         ),
                       ),
                     ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConfirmingDirectionsUI() {
+    if (_frozenFrame == null || _detectedTopology == null) return const SizedBox.shrink();
+
+    return Container(
+      color: const Color(0xFF0A0A0E),
+      child: SafeArea(
+        child: Column(
+          children: [
+            // Top Header
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Confirm Auto-Detected Directions',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Review the legal traffic direction arrows automatically detected for each lane.',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.5),
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // Frozen Frame with Custom Paint overlay
+            Expanded(
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: AspectRatio(
+                      aspectRatio: 9 / 16,
+                      child: Stack(
+                        children: [
+                          Positioned.fill(
+                            child: Image.memory(
+                              _frozenFrame!,
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                          Positioned.fill(
+                            child: LayoutBuilder(
+                              builder: (ctx, constraints) {
+                                final sz = constraints.biggest;
+                                final scaleX = sz.width / _frameWidth;
+                                final scaleY = sz.height / _frameHeight;
+                                return CustomPaint(
+                                  size: sz,
+                                  painter: ConfirmationOverlayPainter(
+                                    topology: _detectedTopology!,
+                                    scaleX: scaleX,
+                                    scaleY: scaleY,
+                                    drawDirections: true,
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+            // Bottom Actions & Buttons
+            Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ElevatedButton(
+                    onPressed: () {
+                      if (_detectedTopology != null) {
+                        _finishCalibration(_detectedTopology!);
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF34C759),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      elevation: 0,
+                    ),
+                    child: const Text(
+                      'Accept & Start Detection',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton(
+                    onPressed: () {
+                      // Retry / Rescan Phase 2
+                      _startObservingPhase();
+                    },
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                    child: Text(
+                      'Retry Auto-Detection',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.8),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -1851,11 +1999,13 @@ class ConfirmationOverlayPainter extends CustomPainter {
     required this.topology,
     required this.scaleX,
     required this.scaleY,
+    this.drawDirections = false,
   });
 
   final ZoneTopology topology;
   final double scaleX;
   final double scaleY;
+  final bool drawDirections;
 
   Color _getColorForType(ZoneType type) {
     switch (type) {
@@ -1877,7 +2027,7 @@ class ConfirmationOverlayPainter extends CustomPainter {
       final zoneColor = _getColorForType(zone.zoneType);
 
       final fillPaint = Paint()
-        ..color = zoneColor.withOpacity(0.15)
+        ..color = zoneColor.withValues(alpha: 0.15)
         ..style = PaintingStyle.fill;
 
       final borderPaint = Paint()
@@ -1902,7 +2052,7 @@ class ConfirmationOverlayPainter extends CustomPainter {
           color: zoneColor,
           fontSize: 10,
           fontWeight: FontWeight.bold,
-          backgroundColor: Colors.black.withOpacity(0.6),
+          backgroundColor: Colors.black.withValues(alpha: 0.6),
         ),
       );
       final textPainter = TextPainter(
@@ -1914,13 +2064,55 @@ class ConfirmationOverlayPainter extends CustomPainter {
         canvas,
         Offset(zone.polygon[0].dx * scaleX, zone.polygon[0].dy * scaleY - 12),
       );
+
+      // Draw legal direction arrow if requested and heading is set
+      if (drawDirections && zone.zoneType == ZoneType.road && zone.legalHeadingDeg != 0.0) {
+        final sPts = zone.polygon.map((p) => Offset(p.dx * scaleX, p.dy * scaleY)).toList();
+        if (sPts.length >= 3) {
+          final cx = sPts.map((p) => p.dx).reduce((a, b) => a + b) / sPts.length;
+          final cy = sPts.map((p) => p.dy).reduce((a, b) => a + b) / sPts.length;
+
+          final rad = zone.legalHeadingDeg * math.pi / 180;
+          final tail = Offset(cx - 20 * math.cos(rad), cy - 20 * math.sin(rad));
+          final tip = Offset(cx + 20 * math.cos(rad), cy + 20 * math.sin(rad));
+
+          _drawArrow(canvas, tail, tip);
+        }
+      }
     }
+  }
+
+  void _drawArrow(Canvas canvas, Offset tail, Offset tip) {
+    const color = Color(0xFFFFC800);
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 3.0
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(tail, tip, paint);
+
+    // Arrowhead
+    const headLen = 12.0;
+    const headAngle = 0.45;
+    final angle = math.atan2(tip.dy - tail.dy, tip.dx - tail.dx);
+    final p1 = Offset(
+        tip.dx - headLen * math.cos(angle - headAngle),
+        tip.dy - headLen * math.sin(angle - headAngle));
+    final p2 = Offset(
+        tip.dx - headLen * math.cos(angle + headAngle),
+        tip.dy - headLen * math.sin(angle + headAngle));
+    final head = Path()
+      ..moveTo(tip.dx, tip.dy)
+      ..lineTo(p1.dx, p1.dy)
+      ..lineTo(p2.dx, p2.dy)
+      ..close();
+    canvas.drawPath(head, Paint()..color = color);
   }
 
   @override
   bool shouldRepaint(covariant ConfirmationOverlayPainter oldDelegate) {
     return oldDelegate.topology != topology ||
         oldDelegate.scaleX != scaleX ||
-        oldDelegate.scaleY != scaleY;
+        oldDelegate.scaleY != scaleY ||
+        oldDelegate.drawDirections != drawDirections;
   }
 }

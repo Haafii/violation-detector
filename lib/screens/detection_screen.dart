@@ -387,9 +387,9 @@ class _DetectionScreenState extends State<DetectionScreen>
 
     // Otherwise, start fresh Auto-Calibration!
     _calibState = _CalibState.capturing;
-    _currentModelPath = 'assets/models/vehicle_yolov11n.tflite';
-    _currentTask = YOLOTask.detect;
-    _includeMasks = false;
+    _currentModelPath = 'assets/models/road_yolov11n.tflite';
+    _currentTask = YOLOTask.segment;
+    _includeMasks = true;
     _isAnalysing = false;
     _calibrationService.reset();
     
@@ -458,17 +458,59 @@ class _DetectionScreenState extends State<DetectionScreen>
       _frozenFrame = null;
       _isAnalysing = false;
       _calibState = _CalibState.capturing;
+      _currentModelPath = 'assets/models/road_yolov11n.tflite';
+      _currentTask = YOLOTask.segment;
+      _includeMasks = true;
+      _hideOverlaysCounter = 0;
+      _overlaysHidden = false;
     });
   }
 
+  void _onCapturePressed() {
+    if (_latestFrame == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Waiting for stable camera feed...')),
+      );
+      return;
+    }
+    if (_isAnalysing) return;
+    setState(() {
+      _isAnalysing = true;
+      _calibState = _CalibState.analysing;
+    });
+    _captureAndAnalyse(_latestFrame!);
+  }
+
   Future<void> _onManualDraw() async {
-    if (_frozenFrame == null) return;
-    
+    final Uint8List? bgFrame = _frozenFrame ?? _latestFrame;
+    if (bgFrame == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Waiting for stable camera feed...')),
+      );
+      return;
+    }
+
+    final Uint8List portraitFrame;
+    if (_frozenFrame == null) {
+      setState(() {
+        _isAnalysing = true;
+      });
+      portraitFrame = await compute(_rotateJpegToPortrait, bgFrame);
+      setState(() {
+        _isAnalysing = false;
+        _frozenFrame = portraitFrame;
+      });
+    } else {
+      portraitFrame = _frozenFrame!;
+    }
+
+    if (!mounted) return;
+
     final result = await Navigator.push<ZoneTopology>(
       context,
       MaterialPageRoute(
         builder: (context) => ManualPolygonScreen(
-          backgroundImage: _frozenFrame!,
+          backgroundImage: portraitFrame,
           frameWidth: _frameWidth.toDouble(),
           frameHeight: _frameHeight.toDouble(),
         ),
@@ -623,25 +665,22 @@ class _DetectionScreenState extends State<DetectionScreen>
   void _onStreamingData(Map<String, dynamic> data) {
     if (!_pipelineReady) return;
 
-    // Hide native overlays once controller is ready
+    final showNative = _currentTask == YOLOTask.segment;
+
+    // Hide native overlays once controller is ready (unless segmenting)
     if (!_overlaysHidden && _yoloController.isInitialized) {
-      _yoloController.setShowOverlays(false);
+      _yoloController.setShowOverlays(showNative);
       _overlaysHidden = true;
     }
 
     if (_hideOverlaysCounter > 0 && _yoloController.isInitialized) {
-      _yoloController.setShowOverlays(false);
+      _yoloController.setShowOverlays(showNative);
       _hideOverlaysCounter--;
     }
 
     if (data['originalImage'] != null) {
       final bytes = data['originalImage'] as Uint8List;
       _latestFrame = bytes;
-
-      if (_calibState == _CalibState.capturing && !_isAnalysing) {
-        _isAnalysing = true;
-        _captureAndAnalyse(bytes);
-      }
 
       // Read actual JPEG resolution once.
       // Swap width/height if landscape to get portrait dimensions.
@@ -930,7 +969,7 @@ class _DetectionScreenState extends State<DetectionScreen>
   @override
   Widget build(BuildContext context) {
     final bool showHud = _calibState == _CalibState.detecting;
-    final bool showCalibrationOverlay = _calibState == _CalibState.capturing || _calibState == _CalibState.analysing;
+    final bool showCalibrationOverlay = _calibState == _CalibState.analysing;
     final bool showConfirmationOverlay = _calibState == _CalibState.confirmingZones;
     final bool showObservingOverlay = _calibState == _CalibState.observing;
 
@@ -958,8 +997,11 @@ class _DetectionScreenState extends State<DetectionScreen>
                       includeMasks: _includeMasks,
                     ),
                     onModelLoad: (path, task) {
-                      _yoloController.setShowOverlays(false);
-                      _hideOverlaysCounter = 30; // Force-hide overlays over the next 30 frames
+                      final isSegment = task == YOLOTask.segment;
+                      _yoloController.setShowOverlays(isSegment);
+                      if (!isSegment) {
+                        _hideOverlaysCounter = 30; // Force-hide overlays over the next 30 frames
+                      }
                     },
                     onStreamingData: _onStreamingData,
                   ),
@@ -1013,6 +1055,11 @@ class _DetectionScreenState extends State<DetectionScreen>
         if (showCalibrationOverlay)
           Positioned.fill(
             child: _buildCalibrationOverlay(),
+          ),
+
+        if (_calibState == _CalibState.capturing)
+          Positioned.fill(
+            child: _buildCapturingOverlay(),
           ),
 
         if (showConfirmationOverlay)
@@ -1400,6 +1447,123 @@ class _DetectionScreenState extends State<DetectionScreen>
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  // ── Phase 1 Capturing Overlay ─────────────────────────────────────────────
+  Widget _buildCapturingOverlay() {
+    return Container(
+      color: Colors.transparent,
+      child: SafeArea(
+        child: Column(
+          children: [
+            // Top Header
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              color: Colors.black.withValues(alpha: 0.55),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.center_focus_strong_outlined,
+                          color: Color(0xFF00D4FF), size: 22),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text(
+                          'Scan & Align Road Lanes',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white60),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Position camera to view road lanes clearly. Colored masks show real-time AI segmentation.',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.5),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // Live feed in middle is transparent
+            const Expanded(child: SizedBox.shrink()),
+
+            // Bottom Actions Card
+            Padding(
+              padding: const EdgeInsets.all(20),
+              child: Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF12121A).withValues(alpha: 0.95),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _onCapturePressed,
+                      icon: const Icon(Icons.camera_alt_rounded, size: 20),
+                      label: const Text(
+                        'Capture Layout',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                      ),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF00D4FF),
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        elevation: 0,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: _onManualDraw,
+                            style: OutlinedButton.styleFrom(
+                              side: BorderSide(color: Colors.white.withValues(alpha: 0.12)),
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            child: Text(
+                              'Draw Manually',
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.8),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );

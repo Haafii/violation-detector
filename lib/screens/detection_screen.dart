@@ -558,6 +558,12 @@ class _DetectionScreenState extends State<DetectionScreen>
 
     if (!mounted) return;
 
+    // Save previous state to restore if they cancel manual drawing
+    final prevState = _calibState;
+    setState(() {
+      _calibState = _CalibState.analysing; // This unmounts YOLOView camera!
+    });
+
     final result = await Navigator.push<ZoneTopology>(
       context,
       MaterialPageRoute(
@@ -569,12 +575,19 @@ class _DetectionScreenState extends State<DetectionScreen>
       ),
     );
 
-    if (result != null && mounted) {
+    if (!mounted) return;
+
+    if (result != null) {
       // Transition to Phase 2 (Observing) to automatically detect traffic directions on the manually drawn zones!
       setState(() {
         _phase1Topology = result;
       });
       _startObservingPhase();
+    } else {
+      // Restore previous state so camera turns back on
+      setState(() {
+        _calibState = prevState;
+      });
     }
   }
 
@@ -1193,6 +1206,10 @@ class _DetectionScreenState extends State<DetectionScreen>
 
   // ── Phase 2 Observing Overlay ─────────────────────────────────────────────
   Widget _buildObservingOverlay() {
+    if (_isModelLoading) {
+      return _buildModelLoadingOverlay('Loading Camera & AI Vehicle Tracker…');
+    }
+
     final tracksInView = _pipelineReady ? _pipeline.trackStates.length : 0;
     final progress = _observingTotalSeconds > 0
         ? (_observingTotalSeconds - _observingSecondsLeft) / _observingTotalSeconds

@@ -340,7 +340,7 @@ class _ManualPolygonScreenState extends State<ManualPolygonScreen> {
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                     ),
                     child: const Text(
-                      'Done & Start Detection',
+                      'Done & Auto-Detect Directions',
                       style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
                     ),
                   ),

@@ -167,6 +167,7 @@ class _DetectionScreenState extends State<DetectionScreen>
   YOLOTask _currentTask = YOLOTask.detect;
   bool _includeMasks = false;
   bool _isAnalysing = false;
+  bool _isModelLoading = true;
 
   Uint8List? _frozenFrame;
   ZoneTopology? _detectedTopology;
@@ -362,6 +363,7 @@ class _DetectionScreenState extends State<DetectionScreen>
       _currentModelPath = 'assets/models/vehicle_yolov11n.tflite';
       _currentTask = YOLOTask.detect;
       _includeMasks = false;
+      _isModelLoading = true;
       _normalizedTopology = _normalizeIfNeeded(widget.topology!);
       _recreatePipelineWithResolution(_frameWidth.toDouble(), _frameHeight.toDouble());
       _pipelineReady = true;
@@ -377,6 +379,7 @@ class _DetectionScreenState extends State<DetectionScreen>
         _currentModelPath = 'assets/models/vehicle_yolov11n.tflite';
         _currentTask = YOLOTask.detect;
         _includeMasks = false;
+        _isModelLoading = true;
         final rawTopology = ZoneTopology.fromJson(stored);
         _normalizedTopology = _normalizeIfNeeded(rawTopology);
         _recreatePipelineWithResolution(_frameWidth.toDouble(), _frameHeight.toDouble());
@@ -392,6 +395,7 @@ class _DetectionScreenState extends State<DetectionScreen>
     _currentTask = YOLOTask.segment;
     _includeMasks = true;
     _isAnalysing = false;
+    _isModelLoading = true;
     _calibrationService.reset();
     
     _topology = ZoneTopology(zones: []);
@@ -495,6 +499,7 @@ class _DetectionScreenState extends State<DetectionScreen>
       _hideOverlaysCounter = 0;
       _overlaysHidden = false;
       _latestDetections = null;
+      _isModelLoading = true;
     });
   }
 
@@ -588,6 +593,7 @@ class _DetectionScreenState extends State<DetectionScreen>
       _observingTotalSeconds = duration;
       _observingSecondsLeft = duration;
       _calibState = _CalibState.observing;
+      _isModelLoading = true;
       // Switch YOLOView to vehicle detection model
       _currentModelPath = 'assets/models/vehicle_yolov11n.tflite';
       _currentTask = YOLOTask.detect;
@@ -595,11 +601,17 @@ class _DetectionScreenState extends State<DetectionScreen>
     });
 
     _observingTimer?.cancel();
+    _observingTimer = null;
+
+    debugPrint('[Calibration] Phase 2: observing traffic initialized, waiting for model load...');
+  }
+
+  void _startObservingTimer() {
+    _observingTimer?.cancel();
     _observingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _onObservingTimerTick();
     });
-
-    debugPrint('[Calibration] Phase 2: observing traffic for ${duration}s...');
+    debugPrint('[Calibration] Phase 2: observing timer started.');
   }
 
   void _onObservingTimerTick() {
@@ -1043,6 +1055,15 @@ class _DetectionScreenState extends State<DetectionScreen>
                       if (!isSegment) {
                         _hideOverlaysCounter = 30; // Force-hide overlays over the next 30 frames
                       }
+                      if (mounted) {
+                        setState(() {
+                          _isModelLoading = false;
+                        });
+                        // If we are in Phase 2 (observing) and the vehicle model has loaded, start the timer!
+                        if (_calibState == _CalibState.observing) {
+                          _startObservingTimer();
+                        }
+                      }
                     },
                     onStreamingData: _onStreamingData,
                   ),
@@ -1081,9 +1102,10 @@ class _DetectionScreenState extends State<DetectionScreen>
             ),
           ),
 
-        if (!_pipelineReady && _calibState == _CalibState.detecting)
-          const Center(
-              child: CircularProgressIndicator(color: Color(0xFF00D4FF))),
+        if ((!_pipelineReady || _isModelLoading) && _calibState == _CalibState.detecting)
+          Positioned.fill(
+            child: _buildModelLoadingOverlay('Initializing Camera & AI Tracker…'),
+          ),
 
         if (showHud) SafeArea(child: _buildHud()),
 
@@ -1124,7 +1146,7 @@ class _DetectionScreenState extends State<DetectionScreen>
         : 0.0;
 
     return Container(
-      color: Colors.black.withOpacity(0.55),
+      color: Colors.black.withValues(alpha: 0.55),
       child: SafeArea(
         child: Column(
           children: [
@@ -1147,20 +1169,21 @@ class _DetectionScreenState extends State<DetectionScreen>
                     ),
                   ),
                   // Skip button → go directly to manual heading
-                  TextButton(
-                    onPressed: () {
-                      _observingTimer?.cancel();
-                      _observingTimer = null;
-                      _onObservingTimerExpired();
-                    },
-                    child: const Text(
-                      'Skip',
-                      style: TextStyle(
-                        color: Color(0xFF00D4FF),
-                        fontWeight: FontWeight.bold,
+                  if (!_isModelLoading)
+                    TextButton(
+                      onPressed: () {
+                        _observingTimer?.cancel();
+                        _observingTimer = null;
+                        _onObservingTimerExpired();
+                      },
+                      child: const Text(
+                        'Skip',
+                        style: TextStyle(
+                          color: Color(0xFF00D4FF),
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -1192,6 +1215,11 @@ class _DetectionScreenState extends State<DetectionScreen>
                               ),
                             );
                           }),
+                        // If model is loading, show loading overlay inside the aspect ratio box!
+                        if (_isModelLoading)
+                          Positioned.fill(
+                            child: _buildModelLoadingOverlay('Loading Camera & AI Vehicle Tracker…'),
+                          ),
                       ],
                     ),
                   ),
@@ -1205,9 +1233,9 @@ class _DetectionScreenState extends State<DetectionScreen>
               child: Container(
                 padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF12121A).withOpacity(0.95),
+                  color: const Color(0xFF12121A).withValues(alpha: 0.95),
                   borderRadius: BorderRadius.circular(18),
-                  border: Border.all(color: Colors.white.withOpacity(0.08)),
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1217,7 +1245,9 @@ class _DetectionScreenState extends State<DetectionScreen>
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          '$tracksInView vehicle${tracksInView == 1 ? '' : 's'} in view',
+                          _isModelLoading
+                              ? 'Initializing camera and model...'
+                              : '$tracksInView vehicle${tracksInView == 1 ? '' : 's'} in view',
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 15,
@@ -1225,7 +1255,7 @@ class _DetectionScreenState extends State<DetectionScreen>
                           ),
                         ),
                         Text(
-                          '${_observingSecondsLeft}s left',
+                          _isModelLoading ? 'Loading…' : '${_observingSecondsLeft}s left',
                           style: const TextStyle(
                             color: Color(0xFF00D4FF),
                             fontSize: 22,
@@ -1239,18 +1269,20 @@ class _DetectionScreenState extends State<DetectionScreen>
                     ClipRRect(
                       borderRadius: BorderRadius.circular(6),
                       child: LinearProgressIndicator(
-                        value: progress.clamp(0.0, 1.0),
+                        value: _isModelLoading ? null : progress.clamp(0.0, 1.0),
                         minHeight: 6,
-                        backgroundColor: Colors.white.withOpacity(0.1),
+                        backgroundColor: Colors.white.withValues(alpha: 0.1),
                         valueColor: const AlwaysStoppedAnimation<Color>(
                             Color(0xFF00D4FF)),
                       ),
                     ),
                     const SizedBox(height: 10),
                     Text(
-                      'Watching live traffic to determine legal direction automatically.\nIf no vehicles are detected, you will be prompted to set direction manually.',
+                      _isModelLoading
+                          ? 'Please wait while the AI tracking model compiles. Keep the camera steady.'
+                          : 'Watching live traffic to determine legal direction automatically.\nIf no vehicles are detected, you will be prompted to set direction manually.',
                       style: TextStyle(
-                        color: Colors.white.withOpacity(0.45),
+                        color: Colors.white.withValues(alpha: 0.45),
                         fontSize: 11,
                         height: 1.5,
                       ),
@@ -1493,8 +1525,44 @@ class _DetectionScreenState extends State<DetectionScreen>
     );
   }
 
+  Widget _buildModelLoadingOverlay(String message) {
+    return Container(
+      color: Colors.black.withValues(alpha: 0.75),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(color: Color(0xFF00D4FF)),
+            const SizedBox(height: 20),
+            Text(
+              message,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.2,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Please wait a moment...',
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.5),
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ── Phase 1 Capturing Overlay ─────────────────────────────────────────────
   Widget _buildCapturingOverlay() {
+    if (_isModelLoading) {
+      return _buildModelLoadingOverlay('Loading Camera & AI Road Model…');
+    }
     return Container(
       color: Colors.transparent,
       child: SafeArea(

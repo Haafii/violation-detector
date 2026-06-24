@@ -58,6 +58,7 @@ class PlateDetector {
     required List<double> vehicleBbox,
     required int frameWidth,
     required int frameHeight,
+    bool isTwoWheeler = false,
   }) async {
     await _ensureLoaded();
     if (_yolo == null) return (overlayBoxes: <DetectionBox>[], plateChips: <Uint8List>[]);
@@ -88,6 +89,14 @@ class PlateDetector {
       for (final det in detections) {
         final r = YOLOResult.fromMap(det as Map);
         if (r.confidence < confThreshold) continue;
+
+        // If it's a two-wheeler, avoid false positive license plate detections
+        // in the upper head/helmet region of the crop (which has 80% padTopRatio).
+        // The top part of the padded crop is the first 80/180 = ~44% of the height.
+        if (isTwoWheeler && r.normalizedBox.top < 0.42) {
+          debugPrint('[PlateDetector] Filtered out plate candidate in upper region (rider head/helmet): ${r.normalizedBox}');
+          continue;
+        }
 
         // Map normalized coords back to full-frame coords
         final px1 = (vx1 + r.normalizedBox.left * vw).clamp(0.0, frameWidth.toDouble());

@@ -28,6 +28,7 @@ class ViolationRecord {
     this.snapshotPath,
     this.vehicleImagePath,
     this.plateImagePath,
+    this.helmetImagePath,
     this.status = ViolationStatus.pending,
   }) : eventId = eventId ??
            '${trackId}_${violationType}_${DateTime.now().millisecondsSinceEpoch}';
@@ -53,6 +54,7 @@ class ViolationRecord {
   String? snapshotPath;
   String? vehicleImagePath;   // saved vehicle crop JPEG path
   String? plateImagePath;     // saved plate chip JPEG path
+  String? helmetImagePath;    // saved helmet crop JPEG path
   final ViolationStatus status;
 
   /// Human-readable violation type label.
@@ -106,6 +108,7 @@ class ViolationRecord {
     List<double>? bbox,
     String? vehicleImagePath,
     String? plateImagePath,
+    String? helmetImagePath,
     ViolationStatus? status,
   }) {
     return ViolationRecord(
@@ -130,6 +133,7 @@ class ViolationRecord {
       snapshotPath: snapshotPath ?? this.snapshotPath,
       vehicleImagePath: vehicleImagePath ?? this.vehicleImagePath,
       plateImagePath: plateImagePath ?? this.plateImagePath,
+      helmetImagePath: helmetImagePath ?? this.helmetImagePath,
       status: status ?? this.status,
     );
   }
@@ -157,6 +161,7 @@ class ViolationRecord {
         'snapshot_path': snapshotPath,
         'vehicle_image_path': vehicleImagePath,
         'plate_image_path': plateImagePath,
+        'helmet_image_path': helmetImagePath,
         'status': status.name,
       };
 
@@ -193,6 +198,7 @@ class ViolationRecord {
       snapshotPath: json['snapshot_path'] as String?,
       vehicleImagePath: json['vehicle_image_path'] as String?,
       plateImagePath: json['plate_image_path'] as String?,
+      helmetImagePath: json['helmet_image_path'] as String?,
       status: statusVal,
     );
   }

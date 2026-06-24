@@ -430,8 +430,10 @@ class _ViolationCardState extends State<_ViolationCard> {
         File(record.vehicleImagePath!).existsSync();
     final hasPlate = record.plateImagePath != null &&
         File(record.plateImagePath!).existsSync();
+    final hasHelmet = record.helmetImagePath != null &&
+        File(record.helmetImagePath!).existsSync();
 
-    // Gather gallery images: vehicle first, then plate
+    // Gather gallery images: vehicle first, then plate, then helmet
     final galleryPaths = <String>[
       if (hasVehicle)
         record.vehicleImagePath!
@@ -439,18 +441,19 @@ class _ViolationCardState extends State<_ViolationCard> {
           File(record.snapshotPath!).existsSync())
         record.snapshotPath!,
       if (hasPlate) record.plateImagePath!,
+      if (hasHelmet) record.helmetImagePath!,
     ];
 
-    return GestureDetector(
-      onTap: galleryPaths.isNotEmpty
-          ? () => _openGallery(galleryPaths, 0)
-          : null,
-      child: SizedBox(
-        height: 160,
-        child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          // Vehicle crop
-          Expanded(
-            flex: 3,
+    return SizedBox(
+      height: 160,
+      child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        // Vehicle crop
+        Expanded(
+          flex: 3,
+          child: GestureDetector(
+            onTap: galleryPaths.isNotEmpty
+                ? () => _openGallery(galleryPaths, 0)
+                : null,
             child: Stack(fit: StackFit.expand, children: [
               if (hasVehicle)
                 Image.file(File(record.vehicleImagePath!), fit: BoxFit.cover)
@@ -485,13 +488,18 @@ class _ViolationCardState extends State<_ViolationCard> {
                 ),
             ]),
           ),
+        ),
 
-          // Vertical divider
-          Container(width: 2, color: const Color(0xFF080810)),
+        // Vertical divider
+        Container(width: 2, color: const Color(0xFF080810)),
 
-          // Plate crop
-          Expanded(
-            flex: 2,
+        // Plate crop
+        Expanded(
+          flex: 2,
+          child: GestureDetector(
+            onTap: hasPlate
+                ? () => _openGallery(galleryPaths, galleryPaths.indexOf(record.plateImagePath!))
+                : null,
             child: hasPlate
                 ? Stack(fit: StackFit.expand, children: [
                     Image.file(File(record.plateImagePath!), fit: BoxFit.cover),
@@ -503,8 +511,29 @@ class _ViolationCardState extends State<_ViolationCard> {
                   ])
                 : _buildPlatePlaceholder(accentColor),
           ),
-        ]),
-      ),
+        ),
+
+        if (hasHelmet) ...[
+          // Vertical divider
+          Container(width: 2, color: const Color(0xFF080810)),
+
+          // Helmet crop
+          Expanded(
+            flex: 2,
+            child: GestureDetector(
+              onTap: () => _openGallery(galleryPaths, galleryPaths.indexOf(record.helmetImagePath!)),
+              child: Stack(fit: StackFit.expand, children: [
+                Image.file(File(record.helmetImagePath!), fit: BoxFit.cover),
+                const Positioned(
+                  top: 8, right: 8,
+                  child: Icon(Icons.open_in_full_rounded,
+                      color: Colors.white54, size: 14),
+                ),
+              ]),
+            ),
+          ),
+        ],
+      ]),
     );
   }
 
@@ -659,6 +688,9 @@ class _ViolationDetailSheet extends StatelessWidget {
             // ── Plate chip ────────────────────────────────────────────
             _buildPlateSection(context, color),
 
+            // ── Helmet chip ───────────────────────────────────────────
+            _buildHelmetSection(context, color),
+
             // ── Info grid ─────────────────────────────────────────────
             Padding(
               padding: const EdgeInsets.all(16),
@@ -764,6 +796,67 @@ class _ViolationDetailSheet extends StatelessWidget {
                     ),
                   ]),
                 ],
+              ],
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _buildHelmetSection(BuildContext context, Color color) {
+    final hasHelmetImage = record.helmetImagePath != null &&
+        File(record.helmetImagePath!).existsSync();
+    if (!hasHelmetImage) return const SizedBox.shrink();
+
+    final helmetImage = Image.file(File(record.helmetImagePath!),
+        height: 90, fit: BoxFit.contain);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFF3B30).withOpacity(0.07),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+              color: const Color(0xFFFF3B30).withOpacity(0.25)),
+        ),
+        child: Row(children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: helmetImage,
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Helmet Detection',
+                    style: TextStyle(
+                        color: Color(0xFFFF3B30),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.5)),
+                const SizedBox(height: 6),
+                const Text('NO HELMET',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 1.0)),
+                const SizedBox(height: 4),
+                Row(children: [
+                  const Icon(Icons.warning_amber_rounded,
+                      color: Color(0xFFFF3B30), size: 12),
+                  const SizedBox(width: 4),
+                  Text(
+                      'Violation Confirmed',
+                      style: TextStyle(
+                          color: Colors.white.withOpacity(0.6),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500)),
+                ]),
               ],
             ),
           ),

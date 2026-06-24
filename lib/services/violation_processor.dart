@@ -15,11 +15,13 @@ class _PendingJob {
   final ViolationRecord record;
   final List<Uint8List> vehicleCrops;
   final Uint8List? frameJpeg;
+  final Uint8List? helmetCrop;
 
   _PendingJob({
     required this.record,
     required this.vehicleCrops,
     this.frameJpeg,
+    this.helmetCrop,
   });
 }
 
@@ -62,8 +64,13 @@ class ViolationProcessor extends ChangeNotifier {
     }
   }
 
-  void enqueue(ViolationRecord record, List<Uint8List> vehicleCrops, Uint8List? frameJpeg) async {
-    debugPrint('[ViolationProcessor] Enqueueing job for record ${record.eventId} (crops: ${vehicleCrops.length})');
+  void enqueue(
+    ViolationRecord record,
+    List<Uint8List> vehicleCrops,
+    Uint8List? frameJpeg, {
+    Uint8List? helmetCrop,
+  }) async {
+    debugPrint('[ViolationProcessor] Enqueueing job for record ${record.eventId} (crops: ${vehicleCrops.length}, helmet: ${helmetCrop != null})');
     
     // Save record as pending immediately
     final pendingRecord = record.copyWith(status: ViolationStatus.pending);
@@ -75,6 +82,7 @@ class ViolationProcessor extends ChangeNotifier {
       record: pendingRecord,
       vehicleCrops: vehicleCrops,
       frameJpeg: frameJpeg,
+      helmetCrop: helmetCrop,
     ));
 
     _processNext();
@@ -111,9 +119,17 @@ class ViolationProcessor extends ChangeNotifier {
             currentRecord, job.vehicleCrops.last);
       }
 
+      // Save helmet crop if present
+      String? helmetImagePath;
+      if (job.helmetCrop != null) {
+        helmetImagePath = await _storage.saveHelmetImage(currentRecord, job.helmetCrop!);
+      }
+
       // 2. Run plate YOLO on every vehicle crop → collect all plate chips
       final allPlateChips = <Uint8List>[];
       img.Image? decoded;
+      final isTwoWheeler = currentRecord.vehicleClass == 'motorcycle' ||
+          currentRecord.vehicleClass == 'two-wheeler';
 
       for (final cropJpeg in job.vehicleCrops) {
         decoded = img.decodeImage(cropJpeg);
@@ -128,6 +144,7 @@ class ViolationProcessor extends ChangeNotifier {
           ],
           frameWidth: decoded.width,
           frameHeight: decoded.height,
+          isTwoWheeler: isTwoWheeler,
         );
         allPlateChips.addAll(result.plateChips);
       }
@@ -154,6 +171,7 @@ class ViolationProcessor extends ChangeNotifier {
         plateConfidence: plateConf,
         vehicleImagePath: vehicleImagePath,
         plateImagePath: plateImagePath,
+        helmetImagePath: helmetImagePath,
       );
       await _storage.save(completedRecord);
       debugPrint('[ViolationProcessor] Completed job for record ${completedRecord.eventId}. Plate: $plateText');

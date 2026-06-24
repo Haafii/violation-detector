@@ -67,6 +67,33 @@ class _CropResult {
   final Uint8List cropJpeg;
 }
 
+class _CropRegionArgs {
+  const _CropRegionArgs({required this.frameJpeg, required this.bbox});
+  final Uint8List frameJpeg;
+  final List<double> bbox; // [x1, y1, x2, y2]
+}
+
+Uint8List? _cropSpecificRegion(_CropRegionArgs args) {
+  try {
+    img.Image? decoded = img.decodeImage(args.frameJpeg);
+    if (decoded == null) return null;
+    if (decoded.width > decoded.height) {
+      decoded = img.copyRotate(decoded, angle: 90);
+    }
+    final x1 = args.bbox[0].toInt().clamp(0, decoded.width - 1);
+    final y1 = args.bbox[1].toInt().clamp(0, decoded.height - 1);
+    final x2 = args.bbox[2].toInt().clamp(0, decoded.width);
+    final y2 = args.bbox[3].toInt().clamp(0, decoded.height);
+    final w = x2 - x1;
+    final h = y2 - y1;
+    if (w <= 0 || h <= 0) return null;
+    final crop = img.copyCrop(decoded, x: x1, y: y1, width: w, height: h);
+    return Uint8List.fromList(img.encodeJpg(crop, quality: 95));
+  } catch (_) {
+    return null;
+  }
+}
+
 
 
 /// Top-level function: runs in a background isolate via compute().
@@ -981,13 +1008,14 @@ class _DetectionScreenState extends State<DetectionScreen>
       // Decode it to get the true pixel dimensions for the bbox.
       final latestCrop = buf.crops.last;
       HelmetStatus frameStatus = HelmetStatus.unknown;
+      Uint8List? frameHelmetCropBytes;
       try {
         // Decode to get actual crop size (needed for correct bbox clamp)
         final cropInfo = img.findDecoderForData(latestCrop)?.startDecode(latestCrop);
         final cropW = (cropInfo?.width ?? 320).toDouble();
         final cropH = (cropInfo?.height ?? 320).toDouble();
 
-        final (status, _) = await _helmetDetector.hasNoHelmet(
+        final (status, boxes) = await _helmetDetector.hasNoHelmet(
           frameBytes: latestCrop,
           // Cover the entire crop — HelmetDetector will still apply padTopRatio
           // upward but cy1 is already 0 so it clamps to 0 (whole crop used).
@@ -996,6 +1024,30 @@ class _DetectionScreenState extends State<DetectionScreen>
           frameHeight: cropH.toInt(),
         );
         frameStatus = status;
+
+        if (status == HelmetStatus.noHelmet && _latestFrame != null) {
+          final noHelmetBox = boxes.firstWhere(
+            (b) => b.label == 'NO HELMET',
+            orElse: () => const DetectionBox(
+              rect: Rect.zero,
+              label: '',
+              confidence: 0.0,
+              color: Colors.transparent,
+            ),
+          );
+          if (noHelmetBox.rect != Rect.zero) {
+            final x1 = noHelmetBox.rect.left;
+            final y1 = noHelmetBox.rect.top;
+            final x2 = noHelmetBox.rect.right;
+            final y2 = noHelmetBox.rect.bottom;
+            
+            // Run background isolate to crop this region from the full-frame
+            frameHelmetCropBytes = await compute(_cropSpecificRegion, _CropRegionArgs(
+              frameJpeg: _latestFrame!,
+              bbox: [x1, y1, x2, y2],
+            ));
+          }
+        }
       } catch (_) {}
 
       // Sliding window — confirm violation when threshold is met
@@ -1021,7 +1073,7 @@ class _DetectionScreenState extends State<DetectionScreen>
         final key = (tid, 'no_helmet');
         if (!_processedTracks.contains(key)) {
           _processedTracks.add(key);
-          _handleViolation(event);
+          _handleViolation(event, helmetCrop: frameHelmetCropBytes);
         }
       }
     }
@@ -1037,7 +1089,7 @@ class _DetectionScreenState extends State<DetectionScreen>
   //      d. Save best plate chip as plate image.
   //      e. Update the record with plate text + image paths.
   // ─────────────────────────────────────────────────────────────────────────
-  Future<void> _handleViolation(ViolationEvent event) async {
+  Future<void> _handleViolation(ViolationEvent event, {Uint8List? helmetCrop}) async {
     debugPrint('[Violation] ${event.violationType} track=${event.trackId}');
     _showFlash();
 
@@ -1098,7 +1150,7 @@ class _DetectionScreenState extends State<DetectionScreen>
     final vehicleCrops =
         List<Uint8List>.from(_vehicleBuffers[event.trackId]?.crops ?? []);
 
-    ViolationProcessor.instance.enqueue(record, vehicleCrops, _latestFrame);
+    ViolationProcessor.instance.enqueue(record, vehicleCrops, _latestFrame, helmetCrop: helmetCrop);
   }
 
   // ─────────────────────────────────────────────────────────────────────────

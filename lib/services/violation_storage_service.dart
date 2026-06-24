@@ -330,6 +330,24 @@ class ViolationStorageService {
     }
   }
 
+  /// Save the best helmet crop JPEG for [record].
+  /// Returns the saved file path, or null on error.
+  Future<String?> saveHelmetImage(
+      ViolationRecord record, Uint8List helmetJpeg) async {
+    try {
+      final dir = await _violationsDir;
+      final safeId =
+          record.eventId.replaceAll(RegExp(r'[^a-zA-Z0-9_\-]'), '_');
+      final f = File('${dir.path}/violation_${safeId}_helmet.jpg');
+      await f.writeAsBytes(helmetJpeg);
+      debugPrint('[Storage] Helmet image saved → ${f.path}');
+      return f.path;
+    } catch (e) {
+      debugPrint('[Storage] Helmet image save error: $e');
+      return null;
+    }
+  }
+
   // ── Legacy snapshot helper (kept for compatibility) ─────────────────────
 
   Future<String?> saveSnapshot(Uint8List bytes, String filename) async {

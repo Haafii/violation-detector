@@ -1036,10 +1036,23 @@ class _DetectionScreenState extends State<DetectionScreen>
             ),
           );
           if (noHelmetBox.rect != Rect.zero) {
-            final x1 = noHelmetBox.rect.left;
-            final y1 = noHelmetBox.rect.top;
-            final x2 = noHelmetBox.rect.right;
-            final y2 = noHelmetBox.rect.bottom;
+            // Map crop-relative coordinates back to full-frame coordinates.
+            // latestCrop was cropped from the full frame using the vehicle's bbox padded upward.
+            final vx1 = state.bbox[0];
+            final vy1 = state.bbox[1];
+            final vx2 = state.bbox[2];
+            final vy2 = state.bbox[3];
+            final vh = vy2 - vy1;
+            
+            // Padded top coordinate (matches img.Image dimensions rotation calculation)
+            final vy1Padded = (vy1 - vh * 0.8).clamp(0, _frameHeight.toDouble());
+            final vCropX = vx1.toInt().clamp(0, _frameWidth - 1);
+            final vCropY = vy1Padded.toInt().clamp(0, _frameHeight - 1);
+
+            final x1 = vCropX + noHelmetBox.rect.left;
+            final y1 = vCropY + noHelmetBox.rect.top;
+            final x2 = vCropX + noHelmetBox.rect.right;
+            final y2 = vCropY + noHelmetBox.rect.bottom;
             
             // Run background isolate to crop this region from the full-frame
             frameHelmetCropBytes = await compute(_cropSpecificRegion, _CropRegionArgs(

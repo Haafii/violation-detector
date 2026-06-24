@@ -1,6 +1,7 @@
 import 'dart:collection';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image/image.dart' as img;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -143,7 +144,7 @@ class HelmetDetector {
     await _ensureLoaded();
     if (_yolo == null) return (HelmetStatus.unknown, <DetectionBox>[]);
 
-    // Apply upward padding
+    // Calculate crop parameters
     final x1 = bbox[0];
     final y1 = bbox[1];
     final x2 = bbox[2];
@@ -155,18 +156,23 @@ class HelmetDetector {
     final cy1 = (y1 - pad).toInt().clamp(0, frameHeight - 1);
     final cx2 = x2.toInt().clamp(0, frameWidth);
     final cy2 = y2.toInt().clamp(0, frameHeight);
+    final cw = cx2 - cx1;
+    final ch = cy2 - cy1;
 
-    if (cx2 <= cx1 || cy2 <= cy1) return (HelmetStatus.unknown, <DetectionBox>[]);
+    if (cw <= 0 || ch <= 0) return (HelmetStatus.unknown, <DetectionBox>[]);
 
     try {
-      final decoded = img.decodeImage(frameBytes);
-      if (decoded == null) return (HelmetStatus.unknown, <DetectionBox>[]);
+      // Offload the heavy image decoding, cropping, and resizing to a background isolate
+      final cropBytes = await compute(_cropHelmetRegion, _HelmetCropArgs(
+        frameBytes: frameBytes,
+        bbox: bbox,
+        padTopRatio: padTopRatio,
+        frameWidth: frameWidth,
+        frameHeight: frameHeight,
+        inputSize: _inputSize,
+      ));
 
-      final crop = img.copyCrop(decoded,
-          x: cx1, y: cy1, width: cx2 - cx1, height: cy2 - cy1);
-      final resized =
-          img.copyResize(crop, width: _inputSize, height: _inputSize);
-      final cropBytes = Uint8List.fromList(img.encodeJpg(resized));
+      if (cropBytes == null) return (HelmetStatus.unknown, <DetectionBox>[]);
 
       final resultMap = await _yolo!.predict(cropBytes);
       final detections = resultMap['detections'] as List<dynamic>? ?? [];
@@ -249,5 +255,55 @@ class HelmetDetector {
 
   Future<void> dispose() async {
     await _yolo?.dispose();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Isolate helpers for offloading CPU-intensive image resizing
+// ─────────────────────────────────────────────────────────────────────────────
+class _HelmetCropArgs {
+  const _HelmetCropArgs({
+    required this.frameBytes,
+    required this.bbox,
+    required this.padTopRatio,
+    required this.frameWidth,
+    required this.frameHeight,
+    required this.inputSize,
+  });
+
+  final Uint8List frameBytes;
+  final List<double> bbox;
+  final double padTopRatio;
+  final int frameWidth;
+  final int frameHeight;
+  final int inputSize;
+}
+
+Uint8List? _cropHelmetRegion(_HelmetCropArgs args) {
+  try {
+    final decoded = img.decodeImage(args.frameBytes);
+    if (decoded == null) return null;
+
+    final x1 = args.bbox[0];
+    final y1 = args.bbox[1];
+    final x2 = args.bbox[2];
+    final y2 = args.bbox[3];
+    final boxH = y2 - y1;
+    final pad = args.padTopRatio * boxH;
+
+    final cx1 = x1.toInt().clamp(0, args.frameWidth - 1);
+    final cy1 = (y1 - pad).toInt().clamp(0, args.frameHeight - 1);
+    final cx2 = x2.toInt().clamp(0, args.frameWidth);
+    final cy2 = y2.toInt().clamp(0, args.frameHeight);
+
+    if (cx2 <= cx1 || cy2 <= cy1) return null;
+
+    final crop = img.copyCrop(decoded,
+        x: cx1, y: cy1, width: cx2 - cx1, height: cy2 - cy1);
+    final resized =
+        img.copyResize(crop, width: args.inputSize, height: args.inputSize);
+    return Uint8List.fromList(img.encodeJpg(resized));
+  } catch (_) {
+    return null;
   }
 }

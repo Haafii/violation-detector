@@ -160,7 +160,7 @@ class _DetectionScreenState extends State<DetectionScreen>
 
   // ── Services ─────────────────────────────────────────────────────────────
   final ViolationStorageService _storage = ViolationStorageService();
-  final HelmetDetector _helmetDetector = HelmetDetector();
+  final HelmetDetector _helmetDetector = HelmetDetector(windowSize: 5);
   final AutoCalibrationService _calibrationService = AutoCalibrationService();
 
   // ── Auto-Calibration state ────────────────────────────────────────────────
@@ -215,7 +215,7 @@ class _DetectionScreenState extends State<DetectionScreen>
   // ── Per-track helmet sliding window ───────────────────────────────────────
   final Map<int, HelmetStatus> _helmetStatusMap = {};
   int _helmetFrameCounter = 0;
-  static const int _helmetEveryNFrames = 15;
+  static const int _helmetEveryNFrames = 5;
 
   // ── Violation flash ───────────────────────────────────────────────────────
   bool _flashVisible = false;

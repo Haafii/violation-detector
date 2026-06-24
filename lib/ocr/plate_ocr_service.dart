@@ -100,11 +100,11 @@ class PlateOcrService {
 
   /// Run OCR across multiple plate-chip JPEGs (raw bytes) and elect best plate.
   /// This is used by the background plate extraction pipeline.
-  Future<(String?, double?)> recognizeBestFromBytes(List<Uint8List> chipJpegs) async {
-    if (chipJpegs.isEmpty) return (null, null);
-    if (_disposed) return (null, null);
+  Future<(String?, double?, Uint8List?)> recognizeBestFromBytes(List<Uint8List> chipJpegs) async {
+    if (chipJpegs.isEmpty) return (null, null, null);
+    if (_disposed) return (null, null, null);
 
-    final allHits = <(String, double)>[];
+    final allHits = <(String, double, Uint8List)>[];
 
     for (final jpeg in chipJpegs) {
       try {
@@ -113,19 +113,23 @@ class PlateOcrService {
         final frame = await codec.getNextFrame();
         final (plate, conf) = await recognizePlate(frame.image);
         if (plate != null && conf != null) {
-          allHits.add((plate, conf));
+          allHits.add((plate, conf, jpeg));
         }
         frame.image.dispose();
       } catch (_) {}
     }
 
-    if (allHits.isEmpty) return (null, null);
-    final winner = electBestPlate(allHits);
-    final conf = allHits
-        .where((h) => h.$1 == winner)
-        .map((h) => h.$2)
-        .reduce((a, b) => a > b ? a : b);
-    return (winner, conf);
+    if (allHits.isEmpty) return (null, null, null);
+    final hitsForElection = allHits.map((h) => (h.$1, h.$2)).toList();
+    final winner = electBestPlate(hitsForElection);
+    
+    // Find the hit that matches the winner.
+    // If multiple hits match the winner, select the one with the highest confidence.
+    final matchingHits = allHits.where((h) => h.$1 == winner).toList();
+    matchingHits.sort((a, b) => b.$2.compareTo(a.$2));
+    
+    final bestHit = matchingHits.first;
+    return (bestHit.$1, bestHit.$2, bestHit.$3);
   }
 
 

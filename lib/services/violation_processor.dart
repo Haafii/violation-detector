@@ -138,13 +138,13 @@ class ViolationProcessor extends ChangeNotifier {
       String? plateImagePath;
 
       if (allPlateChips.isNotEmpty) {
-        final (plate, conf) = await _ocrService.recognizeBestFromBytes(allPlateChips);
+        final (plate, conf, bestChip) = await _ocrService.recognizeBestFromBytes(allPlateChips);
         plateText = plate;
         plateConf = conf;
 
-        // Save the best plate chip as plate image (first one)
-        final bestChip = allPlateChips.first;
-        plateImagePath = await _storage.savePlateImage(currentRecord, bestChip);
+        // Save the best plate chip as plate image
+        final chipToSave = bestChip ?? allPlateChips.first;
+        plateImagePath = await _storage.savePlateImage(currentRecord, chipToSave);
       }
 
       // 4. Update record to complete with plate info + image paths

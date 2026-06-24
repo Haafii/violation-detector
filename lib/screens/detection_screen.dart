@@ -210,6 +210,7 @@ class _DetectionScreenState extends State<DetectionScreen>
   final Map<int, _VehicleCropBuffer> _vehicleBuffers = {};
   static const int _cropEveryNFrames = 8; // ~2 fps at 15fps camera
   int _cropFrameCounter = 0;
+  Future<void>? _currentCropFuture;
 
   // ── Per-track helmet sliding window ───────────────────────────────────────
   final Map<int, HelmetStatus> _helmetStatusMap = {};
@@ -894,7 +895,7 @@ class _DetectionScreenState extends State<DetectionScreen>
 
     _cropFrameCounter++;
     if (_cropFrameCounter % _cropEveryNFrames == 0 && _latestFrame != null) {
-      _cropVehiclesIntoBuffers(_latestFrame!);
+      _currentCropFuture = _cropVehiclesIntoBuffers(_latestFrame!);
     }
 
     _helmetFrameCounter++;
@@ -1056,6 +1057,41 @@ class _DetectionScreenState extends State<DetectionScreen>
     await _storage.save(record);
     if (_latestFrame != null) {
       await _storage.saveViolationSnapshot(record, _latestFrame!);
+    }
+
+    // Wait for the pending crop future to finish so that the latest crops are in the buffer!
+    if (_currentCropFuture != null) {
+      await _currentCropFuture;
+    }
+
+    // If the crop buffer is empty or doesn't exist, let's force crop the vehicle right now!
+    var buf = _vehicleBuffers[event.trackId];
+    if (buf == null || buf.crops.isEmpty) {
+      debugPrint('[Violation] Buffer empty for track=${event.trackId}, forcing crop.');
+      if (_latestFrame != null) {
+        final trackState = _pipeline.trackStates[event.trackId];
+        if (trackState != null) {
+          final args = _CropArgs(
+            frameJpeg: _latestFrame!,
+            tracks: [
+              _TrackArg(
+                trackId: event.trackId,
+                vehicleClass: trackState.vehicleClass,
+                bbox: trackState.bbox,
+              )
+            ],
+          );
+          try {
+            final results = await compute(_cropAllVehicles, args);
+            if (results.isNotEmpty) {
+              buf = _vehicleBuffers.putIfAbsent(event.trackId, () => _VehicleCropBuffer());
+              buf.push(results.first.cropJpeg);
+            }
+          } catch (e) {
+            debugPrint('[Violation] Force crop error: $e');
+          }
+        }
+      }
     }
 
     // ── Background: hand off plate extraction to singleton service ─────────
